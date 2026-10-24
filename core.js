@@ -3,13 +3,16 @@
 function makeCore(SPEC) {
   'use strict';
   const NY = 3;
-  const VERSION = 2;
+  const VERSION = 3;
   const BLOCKS = ['CA', 'NCA', 'AHFS', 'CL', 'NCL', 'LHFS', 'EQ'];
   const BTAGS = ['FA', 'OWC', 'PROV', 'HFS', 'CASH', 'DEBT_ST', 'DEBT_LT', 'EQ'];
   const ITAGS = ['REV_OP', 'REV_OTH', 'RAW', 'PERS', 'DA', 'GA', 'FIN', 'INV', 'EXTR', 'TAX'];
   const NA = 'n/a';
   const REQUIRED_SUP = ['intexp', 'div', 'shares', 'cffo', 'capex'];   // needed by the indicators; k, reported total assets and net profit are optional
   const NUMFMTS = ['auto', 'en', 'eu'];
+  const STD_BS = {}, STD_IS = {};
+  SPEC.BS.forEach(it => { if (it[0] !== 'SEC') STD_BS[it[0]] = { label: it[1], block: it[2], tag: it[3] }; });
+  SPEC.IS.forEach(it => { STD_IS[it[0]] = { label: it[1], tag: it[2] }; });
   const SECTION_OF = { CA: 'Current assets', NCA: 'Non-current assets', AHFS: 'Assets held for sale', CL: 'Current liabilities', NCL: 'Non-current liabilities', LHFS: 'Liabilities held for sale', EQ: 'Equity' };
 
   // ------------------------------------------------------------------ state
@@ -17,12 +20,12 @@ function makeCore(SPEC) {
     const bs = [];
     for (const it of SPEC.BS) {
       if (it[0] === 'SEC') bs.push({ sec: it[1] });
-      else bs.push({ key: it[0], label: it[1], block: it[2], tag: it[3], q: it[4] === 'Y', hint: it[5], src: '', v: [null, null, null] });
+      else bs.push({ key: it[0], label: it[1], block: it[2], tag: it[3], q: it[4] === 'Y', hint: it[5], src: '', rev: false, v: [null, null, null] });
     }
-    const is = SPEC.IS.map(it => ({ key: it[0], label: it[1], tag: it[2], hint: it[3], src: '', v: [null, null, null] }));
+    const is = SPEC.IS.map(it => ({ key: it[0], label: it[1], tag: it[2], hint: it[3], src: '', rev: false, v: [null, null, null] }));
     const sup = {}, supsrc = {};
     for (const it of SPEC.SUP) { sup[it[0]] = [null, null, null]; supsrc[it[0]] = ''; }
-    return { version: VERSION, settings: { company: '', unit: '€ m', mult: 1000000, basis: 1, tol: 1, years: ['Y-2', 'Y-1', 'Y'], scope: [true, true, true], numfmt: 'auto' }, bs, is, sup, supsrc, niprev: null };
+    return { version: VERSION, settings: { company: '', unit: '€ m', mult: 1000000, basis: 1, tol: 1, years: ['Y-2', 'Y-1', 'Y'], scope: [true, true, true], numfmt: 'auto', roundUnit: 1, byFunction: false }, bs, is, sup, supsrc, niprev: null };
   }
 
   function loadExample(ex) {
@@ -86,7 +89,7 @@ function makeCore(SPEC) {
         if (!okTag || !okBlk) { ub++; bad.push({ sheet: 'Balance sheet', label: l.label, block: l.block || '', tag: l.tag || '', year: y, reason: (!l.tag || !l.block) ? 'missing block or tag' : 'unknown ' + (!okBlk ? 'block' : 'tag') }); }
       }
       r.untagbs = ub;
-      r.rev = sumI('REV_OP') + sumI('REV_OTH'); r.raw = sumI('RAW'); r.ga = sumI('GA');
+      r.rev = sumI('REV_OP') + sumI('REV_OTH'); r.raw = sumI('RAW'); r.ga = sumI('GA') - (S.settings.byFunction ? sumI('DA') : 0);
       r.va = r.rev + r.raw + r.ga; r.pers = sumI('PERS'); r.ebitda = r.va + r.pers; r.da = sumI('DA'); r.ebit = r.ebitda + r.da;
       r.fin = sumI('FIN'); r.invinc = sumI('INV'); r.ebtx = r.ebit + r.fin + r.invinc; r.extr = sumI('EXTR'); r.ebt = r.ebtx + r.extr;
       r.tax = sumI('TAX'); r.ni = r.ebt + r.tax;
@@ -205,26 +208,81 @@ function makeCore(SPEC) {
         WHY[x].push(why);
       });
     }
+    // rounding hint: the maximum rounding error of n figures rounded to a unit is n x unit / 2
+    const unit = isNum(S.settings.roundUnit) && S.settings.roundUnit > 0 ? S.settings.roundUnit : 1;
+    CHK.rounding = [];
+    for (let y = 0; y < NY; y++) {
+      const n = lines.filter(l => isNum(l.v[y])).length;
+      const gap = hasBS[y] ? Math.abs(raw[y].balchk) : NA;
+      const maxErr = n * unit / 2;
+      const fails = ck.c_bal[y] === 'CHECK';
+      const within = fails && gap <= maxErr;
+      const tolUp = within ? Math.ceil(Math.round(gap * 1e6) / 1e4) / 100 : null;
+      CHK.rounding.push({ gap, n, maxErr, advice: fails ? (within ? 'within max rounding: if typed correctly set tolerance to ' + tolUp : 'larger than rounding: check the figures') : '', suggestTol: tolUp });
+    }
+    // unit warnings (not part of the status)
+    CHK.unitWarn = { shares: [], eps: [], da: [] };
+    for (let y = 0; y < NY; y++) {
+      const sh = sup(S, 'shares', y), ni = R.ni[y];
+      CHK.unitWarn.shares.push(sh !== null && sh > 0 && sh < 100000 ? 'CHECK UNITS' : '');
+      CHK.unitWarn.da.push(raw[y].da > 0 ? 'CHECK SIGN' : '');
+      CHK.unitWarn.eps.push(sh !== null && sh > 0 && isNum(ni) && Math.abs(ni * mult / sh) > 10000 ? 'CHECK UNITS' : '');
+    }
+    // classification review: lines whose block or tag differs from the standard one, spare lines in use and custom lines
+    const latest = (l, sheet) => {
+      let y = 2; while (y >= 0 && !(scope[y] && isNum(l.v[y]))) y--;
+      if (y < 0) { y = 2; while (y >= 0 && !isNum(l.v[y])) y--; }
+      const base = sheet === 'bs' ? raw[y].ta : raw[y].sales;
+      return { y, amount: l.v[y], share: base ? Math.abs(l.v[y]) / Math.abs(base) : null };
+    };
+    const review = [], renamed = [];
+    for (const l of lines) {
+      if (!l.v.some(isNum)) continue;
+      const std = STD_BS[l.key], reasons = [];
+      if (!std) reasons.push('custom line');
+      else {
+        if ((l.block || '') !== std.block) reasons.push(`block ${std.block} -> ${l.block || '(empty)'}`);
+        if ((l.tag || '') !== std.tag) reasons.push(std.tag ? `tag ${std.tag} -> ${l.tag || '(empty)'}` : `spare line in use, tag ${l.tag || '(empty)'}`);
+      }
+      const a = latest(l, 'bs');
+      const item = { sheet: 'Balance sheet', key: l.key, label: l.label, std: std ? `${std.block}/${std.tag || '(spare)'}` : '(custom)', now: `${l.block || '(empty)'}/${l.tag || '(empty)'}`, year: a.y, amount: a.amount, share: a.share, reasons, rev: !!l.rev };
+      if (reasons.length) review.push(item); else if (std && l.label !== std.label) renamed.push(Object.assign(item, { reasons: ['renamed'] }));
+    }
+    for (const l of S.is) {
+      if (!l.v.some(isNum)) continue;
+      const std = STD_IS[l.key], reasons = [];
+      if (!std) reasons.push('custom line');
+      else if ((l.tag || '') !== std.tag) reasons.push(std.tag ? `tag ${std.tag} -> ${l.tag || '(empty)'}` : `spare line in use, tag ${l.tag || '(empty)'}`);
+      const a = latest(l, 'is');
+      const item = { sheet: 'Income statement', key: l.key, label: l.label, std: std ? (std.tag || '(spare)') : '(custom)', now: l.tag || '(empty)', year: a.y, amount: a.amount, share: a.share, reasons, rev: !!l.rev };
+      if (reasons.length) review.push(item); else if (std && l.label !== std.label) renamed.push(Object.assign(item, { reasons: ['renamed'] }));
+    }
+    review.sort((a, b) => (b.share || 0) - (a.share || 0));
+    CHK.review = review; CHK.renamed = renamed;
     return { R, IND, CHK, WHY, lines };
   }
 
   // ------------------------------------------------------------------ project validation and migration (used for import, restore and example loading)
   function validateProject(o) {
-    const errors = [], warnings = [];
+    const errors = [], warnings = [], notes = [];
     const err = m => { if (errors.length < 12) errors.push(m); };
-    if (!o || typeof o !== 'object' || Array.isArray(o)) return { ok: false, errors: ['The file is not a project (a JSON object was expected).'], warnings };
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return { ok: false, errors: ['The file is not a project (a JSON object was expected).'], warnings, notes };
     const st = o.settings;
     if (!st || typeof st !== 'object' || Array.isArray(st)) err('The settings section is missing.');
     if (!Array.isArray(o.bs)) err('The balance sheet lines (bs) must be a list.');
     if (!Array.isArray(o.is)) err('The income statement lines (is) must be a list.');
     if (!o.sup || typeof o.sup !== 'object' || Array.isArray(o.sup)) err('The supplementary data (sup) must be an object.');
-    if (errors.length) return { ok: false, errors, warnings };
+    if (errors.length) return { ok: false, errors, warnings, notes };
     const settings = {};
     const str = (v, name, dflt) => { if (v === undefined || v === null) return dflt; if (typeof v === 'string') return v; if (typeof v === 'number' && isFinite(v)) return String(v); err(`settings.${name} must be text.`); return dflt; };
     settings.company = str(st.company, 'company', ''); settings.unit = str(st.unit, 'unit', '€ m');
     settings.mult = st.mult === undefined ? 1000000 : st.mult; if (!isNum(settings.mult) || settings.mult <= 0) err('settings.mult must be a positive number.');
     settings.basis = st.basis === undefined ? 1 : st.basis; if (settings.basis !== 1 && settings.basis !== 2) err('settings.basis must be 1 or 2.');
     settings.tol = st.tol === undefined ? 1 : st.tol; if (!isNum(settings.tol) || settings.tol < 0) err('settings.tol must be a number of at least 0.');
+    settings.roundUnit = st.roundUnit === undefined ? 1 : st.roundUnit; if (!isNum(settings.roundUnit) || settings.roundUnit <= 0) err('settings.roundUnit must be a positive number.');
+    if (st.byFunction === undefined) settings.byFunction = false;
+    else if (typeof st.byFunction !== 'boolean') err('settings.byFunction must be true or false.');
+    else settings.byFunction = st.byFunction;
     if (!Array.isArray(st.years) || st.years.length !== NY || st.years.some(x => !(typeof x === 'string' || (typeof x === 'number' && isFinite(x))))) err('settings.years must list three year labels.');
     else settings.years = st.years.map(String);
     if (st.scope === undefined) settings.scope = [true, true, true];
@@ -243,12 +301,12 @@ function makeCore(SPEC) {
       if (!l || typeof l !== 'object' || Array.isArray(l)) { err(`${w} is not an object.`); return null; }
       if ('sec' in l) return { sec: text(l.sec, w, 'sec') };
       return { key: l.key === undefined || l.key === null ? undefined : String(l.key), label: text(l.label, w, 'label'), block: text(l.block, w, 'block'), tag: text(l.tag, w, 'tag'),
-        q: !!l.q, hint: text(l.hint, w, 'hint'), src: text(l.src, w, 'src'), v: vals(l.v, w) };
+        q: !!l.q, hint: text(l.hint, w, 'hint'), src: text(l.src, w, 'src'), rev: !!l.rev, v: vals(l.v, w) };
     });
     const is = o.is.map((l, i) => {
       const w = `Income statement row ${i + 1}`;
       if (!l || typeof l !== 'object' || Array.isArray(l)) { err(`${w} is not an object.`); return null; }
-      return { key: l.key === undefined || l.key === null ? undefined : String(l.key), label: text(l.label, w, 'label'), tag: text(l.tag, w, 'tag'), hint: text(l.hint, w, 'hint'), src: text(l.src, w, 'src'), v: vals(l.v, w) };
+      return { key: l.key === undefined || l.key === null ? undefined : String(l.key), label: text(l.label, w, 'label'), tag: text(l.tag, w, 'tag'), hint: text(l.hint, w, 'hint'), src: text(l.src, w, 'src'), rev: !!l.rev, v: vals(l.v, w) };
     });
     const supKeys = SPEC.SUP.map(x => x[0]);
     const supv = {}, supsrc = {};
@@ -259,7 +317,7 @@ function makeCore(SPEC) {
     if (o.supsrc && typeof o.supsrc === 'object' && !Array.isArray(o.supsrc)) for (const key of supKeys) if (typeof o.supsrc[key] === 'string') supsrc[key] = o.supsrc[key];
     let niprev = null;
     if (o.niprev !== undefined && o.niprev !== null && o.niprev !== '') { if (isNum(o.niprev)) niprev = o.niprev; else err('niprev must be a number.'); }
-    if (errors.length) return { ok: false, errors, warnings };
+    if (errors.length) return { ok: false, errors, warnings, notes };
 
     // migrate by stable line key: catalogue lines keep their position, unknown lines are kept as custom lines
     const blank = blankState();
@@ -282,7 +340,7 @@ function makeCore(SPEC) {
     for (const c of catBS) {
       if (c.sec) { flushCustom(); section = c.sec; outBS.push({ sec: c.sec }); continue; }
       const m = byKey.get(c.key);
-      if (m) outBS.push(Object.assign({}, c, { label: m.label || c.label, block: m.block, tag: m.tag, q: m.q, src: m.src, v: m.v.slice() }));
+      if (m) outBS.push(Object.assign({}, c, { label: m.label || c.label, block: m.block, tag: m.tag, q: m.q, src: m.src, rev: m.rev, v: m.v.slice() }));
       else { outBS.push(Object.assign({}, c)); if (hasKeys) added++; }
     }
     flushCustom();
@@ -291,16 +349,16 @@ function makeCore(SPEC) {
     const isHasKeys = is.length > 0 && is.every(l => l.key);
     const isByKey = new Map();
     is.forEach((l, i) => { const key = isHasKeys ? l.key : (is.length === isCat.length ? isCat[i].key : undefined); if (key && !isByKey.has(key)) isByKey.set(key, l); });
-    const outIS = isCat.map(c => { const m = isByKey.get(c.key); if (!m) { if (isHasKeys) added++; return Object.assign({}, c); } return Object.assign({}, c, { label: m.label || c.label, tag: m.tag, src: m.src, v: m.v.slice() }); });
+    const outIS = isCat.map(c => { const m = isByKey.get(c.key); if (!m) { if (isHasKeys) added++; return Object.assign({}, c); } return Object.assign({}, c, { label: m.label || c.label, tag: m.tag, src: m.src, rev: m.rev, v: m.v.slice() }); });
     const isMatched = new Set(isByKey.values());
     const isCustom = is.filter(l => !isMatched.has(l) || !isCat.some(c => isByKey.get(c.key) === l));
     isCustom.forEach(l => outIS.push(Object.assign({}, l, { key: l.key || 'customis' + outIS.length })));
     const nCustom = customBS.length + isCustom.length;
     if (nCustom) warnings.push(`${nCustom} custom line${nCustom > 1 ? 's' : ''} not in the standard list ${nCustom > 1 ? 'were' : 'was'} kept.`);
-    if (added) warnings.push(`${added} line${added > 1 ? 's' : ''} of the current standard list ${added > 1 ? 'were' : 'was'} added empty.`);
+    if (added) notes.push(`${added} line${added > 1 ? 's' : ''} of the current standard list ${added > 1 ? 'were' : 'was'} added empty.`);
     const project = { version: VERSION, settings: Object.assign({}, blank.settings, settings), bs: outBS, is: outIS, sup: Object.assign({}, blank.sup, supv), supsrc: Object.assign({}, blank.supsrc, supsrc), niprev };
-    try { calc(project); } catch (e) { return { ok: false, errors: ['The project could not be calculated: ' + e.message], warnings }; }
-    return { ok: true, errors, warnings, project };
+    try { calc(project); } catch (e) { return { ok: false, errors: ['The project could not be calculated: ' + e.message], warnings, notes }; }
+    return { ok: true, errors, warnings, notes, project };
   }
 
   // ------------------------------------------------------------------ indicator catalogue (labels, formula text, format)
@@ -350,8 +408,8 @@ function makeCore(SPEC) {
 
   function layout(S) {
     // row numbers on the Inputs sheet, same as the Excel toolkit
-    const L = { bs: {}, bsRows: [], isRows: [], sup: {}, scopeRow: 11 };
-    let r = 14; L.bs0 = r;
+    const L = { bs: {}, bsRows: [], isRows: [], sup: {}, scopeRow: 11, roundRow: 12, funcRow: 13 };
+    let r = 16; L.bs0 = r;
     for (const it of S.bs) { L.bsRows.push(r); if (it.key) L.bs[it.key] = r; r++; }
     L.bs1 = r - 1;
     r += 1; L.isBand = r; r += 1; L.isHead = r; r += 1; L.is0 = r;
@@ -404,6 +462,7 @@ function makeCore(SPEC) {
       ['Not included', 'Common size, peer sheets and benchmark: use the full Excel toolkit for those.'],
       ['Years in scope', 'Inputs row 11: 1 = the year is analysed, 0 = out of scope (for example a report with only two years). The status looks only at the years in scope.'],
       ['Status cell', 'Reclass!C2 says ALL CHECKS OK only when every year in scope reconciles AND has the balance sheet, the income statement and the five required supplementary inputs. INCOMPLETE INPUTS means something is missing; OK FOR n OF m YEARS means a year in scope is empty; NO DATA YET means nothing is filled. A missing input is n/a, never zero; an explicit 0 is a valid number.'],
+      ['Rounding, review, units', 'Reclass shows, outside the status: the balance sheet gap with a rounding advice (Inputs F12 = rounding unit), the number of lines to review (Inputs column K: block or tag different from the standard one, custom lines, spare lines in use), unit warnings for shares and EPS, and a sign warning when depreciation is typed positive. For a by-function income statement set Inputs F13 = 1: depreciation is typed once on the DA line and is added back inside G&A automatically.'],
       ['Rule', 'No page reference, no number. Adjusted or non-IFRS figures must be labelled as such. Check every figure against the source before it goes in the deck.'],
       ['Exported', new Date().toISOString().slice(0, 10)],
     ];
@@ -411,10 +470,10 @@ function makeCore(SPEC) {
 
     // ---------------- Inputs
     const wi = wb.addWorksheet('Inputs');
-    [62, 8, 11, 8, 6, 14, 14, 14, 70].forEach((w, i) => { wi.getColumn(i + 1).width = w; });
+    [62, 8, 11, 8, 6, 14, 14, 14, 70, 16, 9].forEach((w, i) => { wi.getColumn(i + 1).width = w; });
     put(wi, 'A1', 'INPUTS - ' + (S.settings.company || 'COMPANY').toUpperCase(), { bold: true, size: 14 });
     put(wi, 'A2', 'Blue on yellow = type here. Black = formula. Balance sheet: enter lines as reported, POSITIVE. Income statement: enter the PROFIT EFFECT (income +, costs -). Leave a cell empty if the figure is missing: an empty cell is n/a, an explicit 0 is a number.', { italic: true, color: GREY });
-    band(wi, 4, 'SETTINGS', 9);
+    band(wi, 4, 'SETTINGS', 11);
     const st = S.settings;
     [[5, 'Company name', st.company, null, ''], [6, 'Unit label (for headers)', st.unit, null, ''], [7, 'Unit multiplier (units per 1 in the statements)', st.mult, '#,##0', '1,000,000 if the statements are in millions. Used only for EPS.'],
       [8, 'Residual income: capital basis (1 or 2)', st.basis, '0', '1 = equity + financial liabilities (lecture 08 definition); 2 = reclassified invested capital (equity + NFP)'],
@@ -428,20 +487,34 @@ function makeCore(SPEC) {
     put(wi, 'A11', 'Year in scope? (1 = analysed, 0 = out of scope)');
     INP.forEach((c, i) => { put(wi, `${c}11`, (st.scope && st.scope[i] === false) ? 0 : 1, { color: BLUE, fill: fillIn, border: true, h: 'right', fmt: '0' }); wi.getCell(`${c}11`).dataValidation = { type: 'list', allowBlank: false, formulae: ['"1,0"'] }; });
     put(wi, 'I11', 'Set 0 for a year the report does not contain. The status is judged on the years in scope only.', { color: GREY, italic: true });
-    band(wi, 12, 'BALANCE SHEET (positive numbers, as reported)', 9);
-    ['Line item', 'Block', 'Reclass tag', 'Quick?', 'Sign'].forEach((t, i) => put(wi, `${'ABCDE'[i]}13`, t, { bold: true, fill: fillSub, border: true, h: i ? 'center' : undefined }));
-    INP.forEach(c => put(wi, `${c}13`, F(`${c}$10`, st.years[INP.indexOf(c)]), { bold: true, fill: fillSub, border: true, h: 'right' }));
-    put(wi, 'I13', 'Source page / note', { bold: true, fill: fillSub, border: true });
+    put(wi, 'A12', 'Rounding unit of the statements (1 = whole units, 0.1 = one decimal)');
+    put(wi, 'F12', st.roundUnit, { color: BLUE, fill: fillIn, fmt: '0.0##', border: true, h: 'right' });
+    put(wi, 'I12', 'Used only to tell a rounding gap from a typing error: the maximum rounding error of n figures is n x unit / 2.', { color: GREY, italic: true });
+    put(wi, 'A13', 'Income statement by function? (1 = add depreciation back inside G&A automatically)');
+    put(wi, 'F13', st.byFunction ? 1 : 0, { color: BLUE, fill: fillIn, fmt: '0', border: true, h: 'right' });
+    wi.getCell('F13').dataValidation = { type: 'list', allowBlank: false, formulae: ['"1,0"'] };
+    put(wi, 'I13', 'Set 1 when the statement shows cost of sales, SG&A and no depreciation line. Type depreciation once on the DA line (negative): the toolkit offsets it in G&A so EBIT does not change.', { color: GREY, italic: true });
+    band(wi, 14, 'BALANCE SHEET (positive numbers, as reported)', 11);
+    ['Line item', 'Block', 'Reclass tag', 'Quick?', 'Sign'].forEach((t, i) => put(wi, `${'ABCDE'[i]}15`, t, { bold: true, fill: fillSub, border: true, h: i ? 'center' : undefined }));
+    INP.forEach(c => put(wi, `${c}15`, F(`${c}$10`, st.years[INP.indexOf(c)]), { bold: true, fill: fillSub, border: true, h: 'right' }));
+    put(wi, 'I15', 'Source page / note', { bold: true, fill: fillSub, border: true });
+    put(wi, 'J15', 'Standard block / tag', { bold: true, fill: fillSub, border: true });
+    put(wi, 'K15', 'Review', { bold: true, fill: fillSub, border: true, h: 'center' });
     S.bs.forEach((it, i) => {
       const r = L.bsRows[i];
-      if (it.sec) { put(wi, `A${r}`, it.sec, { bold: true, fill: fillSec }); 'BCDEFGHI'.split('').forEach(c => { wi.getCell(`${c}${r}`).fill = fillSec; }); return; }
+      if (it.sec) { put(wi, `A${r}`, it.sec, { bold: true, fill: fillSec }); 'BCDEFGHIJK'.split('').forEach(c => { wi.getCell(`${c}${r}`).fill = fillSec; }); return; }
       put(wi, `A${r}`, it.label, { border: true });
-      put(wi, `B${r}`, it.block || '', { color: BLUE, fill: fillIn, border: true, h: 'center' });
-      put(wi, `C${r}`, it.tag || '', { color: BLUE, fill: fillIn, border: true, h: 'center' });
-      put(wi, `D${r}`, it.q ? 'Y' : '', { color: BLUE, fill: fillIn, border: true, h: 'center' });
+      put(wi, `B${r}`, it.block || null, { color: BLUE, fill: fillIn, border: true, h: 'center' });
+      put(wi, `C${r}`, it.tag || null, { color: BLUE, fill: fillIn, border: true, h: 'center' });
+      put(wi, `D${r}`, it.q ? 'Y' : null, { color: BLUE, fill: fillIn, border: true, h: 'center' });
       put(wi, `E${r}`, F(`IF(B${r}="",0,IF(OR(B${r}="CA",B${r}="NCA",B${r}="AHFS"),1,-1))`, sign(it.block)), { border: true, h: 'center' });
       INP.forEach((c, y) => put(wi, `${c}${r}`, isNum(it.v[y]) ? it.v[y] : null, { color: BLUE, fill: fillIn, fmt: FMT.num, border: true }));
-      put(wi, `I${r}`, it.src || it.hint || '', { color: GREY, italic: true });
+      put(wi, `I${r}`, it.src || it.hint || null, { color: GREY, italic: true });
+      const sd = STD_BS[it.key];
+      put(wi, `J${r}`, sd ? (sd.tag ? `${sd.block}/${sd.tag}` : `${sd.block}/(spare)`) : '(custom)', { color: GREY, border: true });
+      const cnt = `COUNT(F${r}:H${r})=0`, tagc = sd && sd.tag ? `C${r}<>"${sd.tag}"` : `LEN(C${r})>0`;
+      const flagged = C.CHK.review.some(x => x.sheet === 'Balance sheet' && x.key === it.key && x.label === it.label);
+      put(wi, `K${r}`, F(sd ? `IF(${cnt},"-",IF(OR(B${r}<>"${sd.block}",${tagc}),"REVIEW","ok"))` : `IF(${cnt},"-","REVIEW")`, !it.v.some(isNum) ? '-' : flagged ? 'REVIEW' : 'ok'), { color: GREY, border: true, h: 'center' });
     });
     S.bs.forEach((it, i) => {
       if (it.sec) return; const r = L.bsRows[i];
@@ -449,20 +522,27 @@ function makeCore(SPEC) {
       wi.getCell(`C${r}`).dataValidation = { type: 'list', allowBlank: true, formulae: [`"${BTAGS.join(',')}"`] };
       wi.getCell(`D${r}`).dataValidation = { type: 'list', allowBlank: true, formulae: ['"Y"'] };
     });
-    band(wi, L.isBand, 'INCOME STATEMENT (profit effect: income +, costs -)', 9);
+    band(wi, L.isBand, 'INCOME STATEMENT (profit effect: income +, costs -)', 11);
     put(wi, `A${L.isHead}`, 'Line item', { bold: true, fill: fillSub, border: true }); put(wi, `C${L.isHead}`, 'Reclass tag', { bold: true, fill: fillSub, border: true, h: 'center' });
     ['B', 'D', 'E'].forEach(c => put(wi, `${c}${L.isHead}`, null, { fill: fillSub, border: true }));
     INP.forEach((c, y) => put(wi, `${c}${L.isHead}`, F(`${c}$10`, st.years[y]), { bold: true, fill: fillSub, border: true, h: 'right' }));
     put(wi, `I${L.isHead}`, 'Source page / note', { bold: true, fill: fillSub, border: true });
+    put(wi, `J${L.isHead}`, 'Standard tag', { bold: true, fill: fillSub, border: true });
+    put(wi, `K${L.isHead}`, 'Review', { bold: true, fill: fillSub, border: true, h: 'center' });
     S.is.forEach((it, i) => {
       const r = L.isRows[i];
       put(wi, `A${r}`, it.label, { border: true });
-      put(wi, `C${r}`, it.tag || '', { color: BLUE, fill: fillIn, border: true, h: 'center' });
+      put(wi, `C${r}`, it.tag || null, { color: BLUE, fill: fillIn, border: true, h: 'center' });
       wi.getCell(`C${r}`).dataValidation = { type: 'list', allowBlank: true, formulae: [`"${ITAGS.join(',')}"`] };
       INP.forEach((c, y) => put(wi, `${c}${r}`, isNum(it.v[y]) ? it.v[y] : null, { color: BLUE, fill: fillIn, fmt: FMT.num, border: true }));
-      put(wi, `I${r}`, it.src || it.hint || '', { color: GREY, italic: true });
+      put(wi, `I${r}`, it.src || it.hint || null, { color: GREY, italic: true });
+      const sd = STD_IS[it.key];
+      put(wi, `J${r}`, sd ? (sd.tag || '(spare)') : '(custom)', { color: GREY, border: true });
+      const cnt = `COUNT(F${r}:H${r})=0`, tagc = sd && sd.tag ? `C${r}<>"${sd.tag}"` : `LEN(C${r})>0`;
+      const flagged = C.CHK.review.some(x => x.sheet === 'Income statement' && x.key === it.key && x.label === it.label);
+      put(wi, `K${r}`, F(sd ? `IF(${cnt},"-",IF(${tagc},"REVIEW","ok"))` : `IF(${cnt},"-","REVIEW")`, !it.v.some(isNum) ? '-' : flagged ? 'REVIEW' : 'ok'), { color: GREY, border: true, h: 'center' });
     });
-    band(wi, L.supBand, 'SUPPLEMENTARY DATA FOR THE INDICATORS (the first five are required by the indicators)', 9);
+    band(wi, L.supBand, 'SUPPLEMENTARY DATA FOR THE INDICATORS (the first five are required by the indicators)', 11);
     put(wi, `A${L.supHead}`, 'Item', { bold: true, fill: fillSub, border: true });
     ['B', 'C', 'D', 'E'].forEach(c => put(wi, `${c}${L.supHead}`, null, { fill: fillSub, border: true }));
     INP.forEach((c, y) => put(wi, `${c}${L.supHead}`, F(`${c}$10`, st.years[y]), { bold: true, fill: fillSub, border: true, h: 'right' }));
@@ -476,7 +556,9 @@ function makeCore(SPEC) {
     put(wi, `A${L.niprev}`, 'Net profit of the year before the first column (first payout ratio only)', { border: true });
     put(wi, `F${L.niprev}`, isNum(S.niprev) ? S.niprev : null, { color: BLUE, fill: fillIn, fmt: FMT.num, border: true });
     put(wi, `I${L.niprev}`, 'Optional. Leave empty if unknown: the first payout then shows n/a', { color: GREY, italic: true });
-    wi.views = [{ state: 'frozen', ySplit: 13, xSplit: 1 }];
+    for (const rng of [`K${L.bs0}:K${L.bs1}`, `K${L.is0}:K${L.is1}`]) wi.addConditionalFormatting({ ref: rng, rules: [{ type: 'cellIs', operator: 'equal', formulae: ['"REVIEW"'], priority: 4,
+      style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFEB9C' } }, font: { color: { argb: 'FF9C5700' }, bold: true } } }] });
+    wi.views = [{ state: 'frozen', ySplit: 15, xSplit: 1 }];
 
     // ---------------- Reclass
     const wr = wb.addWorksheet('Reclass');
@@ -520,7 +602,7 @@ function makeCore(SPEC) {
       ['SEC', 'RECLASSIFIED INCOME STATEMENT: from revenues to net income'],
       ['rev', 'Total revenues', 'Sales from operations + other income and revenues', (ci) => spi('REV_OP', ci) + '+' + spi('REV_OTH', ci), true],
       ['raw', 'Raw materials (purchases, services and other)', 'Tag RAW', (ci) => spi('RAW', ci), false],
-      ['ga', 'General and administration expenses', 'Tag GA: all other operating items', (ci) => spi('GA', ci), false],
+      ['ga', 'General and administration expenses', 'Tag GA: all other operating items; for a by-function statement (Inputs F13 = 1) depreciation is added back here automatically', (ci) => spi('GA', ci) + `-IF(Inputs!$F$13=1,` + spi('DA', ci) + `,0)`, false],
       ['va', 'VALUE ADDED', 'Revenues + raw materials + G&A', (ci, co, R) => `${co}${R.rev}+${co}${R.raw}+${co}${R.ga}`, true],
       ['pers', 'Personnel costs', 'Tag PERS', (ci) => spi('PERS', ci), false],
       ['ebitda', 'EBITDA', 'Value added + personnel costs', (ci, co, R) => `${co}${R.va}+${co}${R.pers}`, true],
@@ -552,6 +634,16 @@ function makeCore(SPEC) {
       ['s_sup', 'Required supplementary inputs entered (of 5)', 'Interest expense, dividends, shares, CFFO, capex', (ci) => `COUNT(Inputs!${ci}${L.sup.intexp}:${ci}${L.sup.capex})`, false, '0'],
       ['s_state', 'Year state', 'complete / partial / empty / out of scope', (ci, co, R) => `IF(${co}${R.s_scope}=0,"out of scope",IF(AND(${co}${R.s_bs}=0,${co}${R.s_is}=0,${co}${R.s_sup}=0),"empty",IF(AND(${co}${R.s_bs}=1,${co}${R.s_is}=1,${co}${R.s_sup}=5,${co}${R.c_bal}="OK",${co}${R.c_cov}="OK"),"complete","partial")))`, false, 'chk'],
       ['s_opt', 'Optional checks not run', 'Reported net profit / total assets not typed', (ci, co, R) => `IF(${co}${R.s_scope}=1,IF(${co}${R.c_ni}="n/a",1,0)+IF(${co}${R.c_ta}="n/a",1,0),0)`, false, '0'],
+      ['BL'],
+      ['SEC', 'ROUNDING, CLASSIFICATION REVIEW AND UNIT WARNINGS (not part of the status)'],
+      ['s_gap', 'Balance sheet gap (absolute)', 'Total assets - total liabilities - equity', (ci, co, R) => `ABS(${co}${R.balchk})`, false],
+      ['s_n', 'Balance sheet cells with a number', 'Counts the figures that were typed', (ci) => `COUNT(${val(ci)})`, false, '0'],
+      ['s_maxr', 'Maximum rounding error of those figures', 'Figures x rounding unit (Inputs F12) / 2', (ci, co, R) => `${co}${R.s_n}*Inputs!$F$12/2`, false, 'r3'],
+      ['s_adv', 'Rounding advice', 'Shown only when the balance check fails', (ci, co, R) => `IF(${co}${R.c_bal}="CHECK",IF(${co}${R.s_gap}<=${co}${R.s_maxr},"within max rounding: if typed correctly set tolerance to "&ROUNDUP(${co}${R.s_gap},2),"larger than rounding: check the figures"),"-")`, false, 'txt'],
+      ['s_rev', 'Lines to review', 'Lines whose block or tag differs from the standard one, custom lines or spare lines in use (Inputs column K)', () => `COUNTIF(Inputs!$K$${bs0}:$K$${bs1},"REVIEW")+COUNTIF(Inputs!$K$${is0}:$K$${is1},"REVIEW")`, false, '0'],
+      ['s_wsh', 'Unit warning: shares', 'Shares below 100,000 look like millions: type units', (ci) => `IF(ISNUMBER(${supRef('shares', ci)}),IF(AND(${supRef('shares', ci)}>0,${supRef('shares', ci)}<100000),"CHECK UNITS","OK"),"-")`, false, 'txt'],
+      ['s_weps', 'Unit warning: EPS', 'EPS above 10,000 usually means shares typed in millions', (ci, co, R) => `IF(AND(ISNUMBER(${supRef('shares', ci)}),${supRef('shares', ci)}>0,ISNUMBER(${co}${R.ni})),IF(ABS(${co}${R.ni}*Inputs!$F$7/${supRef('shares', ci)})>10000,"CHECK UNITS","OK"),"-")`, false, 'txt'],
+      ['s_wda', 'Sign warning: depreciation', 'Depreciation is a cost: type it with a minus sign (a positive figure corrupts EBITDA even when EBIT is unchanged)', (ci) => `IF(COUNT(${vali(ci)})=0,"-",IF(${spi('DA', ci)}>0,"CHECK SIGN","OK"))`, false, 'txt'],
     ];
     const RR = {}; { let r = 6; for (const s of rows) { if (s[0] !== 'BL' && s[0] !== 'SEC') RR[s[0]] = r; r++; } }
     const cachedFor = (key, i) => {
@@ -563,6 +655,16 @@ function makeCore(SPEC) {
       if (key === 's_sup') return Y.supN;
       if (key === 's_state') return Y.state;
       if (key === 's_opt') return Y.optionalNotRun;
+      const Q = C.CHK.rounding[i];
+      if (key === 's_gap') return Q.gap;
+      if (key === 's_n') return Q.n;
+      if (key === 's_maxr') return Q.maxErr;
+      if (key === 's_adv') return Q.advice || '-';
+      if (key === 's_rev') return C.CHK.review.length;
+      const shv = sup(S, 'shares', i);
+      if (key === 's_wsh') return shv === null ? '-' : (C.CHK.unitWarn.shares[i] || 'OK');
+      if (key === 's_weps') return (shv !== null && shv > 0 && isNum(C.R.ni[i])) ? (C.CHK.unitWarn.eps[i] || 'OK') : '-';
+      if (key === 's_wda') return Y.hasIS ? (C.CHK.unitWarn.da[i] || 'OK') : '-';
       return C.R[key][i];
     };
     put(wr, 'A1', F(`IF(Inputs!$F$5="","Company",Inputs!$F$5)&" - reclassified statements"`, (st.company || 'Company') + ' - reclassified statements'), { bold: true, size: 14 });
@@ -580,10 +682,10 @@ function makeCore(SPEC) {
         put(wr, `B${r}`, note, { color: GREY, italic: true, border: true });
         OUT.forEach((co, i) => {
           let f = fn(INP[i], co, RR);
-          if (BS_KEYS.includes(key)) f = `IF(COUNT(${val(INP[i])})=0,"n/a",${f})`;
+          if (BS_KEYS.includes(key) || key === 's_gap') f = `IF(COUNT(${val(INP[i])})=0,"n/a",${f})`;
           if (IS_KEYS.includes(key)) f = `IF(COUNT(${vali(INP[i])})=0,"n/a",${f})`;
           const res = cachedFor(key, i);
-          put(wr, `${co}${r}`, F(f, res), { bold, fmt: (fmtKey === 'chk') ? undefined : fmtKey === '0' ? '0' : FMT.num, border: true, h: (fmtKey === 'chk' || res === NA) ? 'right' : undefined });
+          put(wr, `${co}${r}`, F(f, res), { bold, fmt: (fmtKey === 'chk' || fmtKey === 'txt') ? undefined : fmtKey === '0' ? '0' : fmtKey === 'r3' ? '0.0##' : FMT.num, border: true, h: (fmtKey === 'chk' || res === NA) ? 'right' : undefined });
         });
         r++;
       } }
@@ -593,6 +695,8 @@ function makeCore(SPEC) {
     wr.mergeCells('C2:E2');
     cfStatus(wr, 'C2', 'ALL CHECKS OK', 'CHECK THE DATA'); cfAmber(wr, 'C2:C2');
     cfStatus(wr, `C${RR.c_bal}:E${RR.c_tag}`, 'OK', 'CHECK');
+    for (const k of ['s_wsh', 's_weps', 's_wda']) wr.addConditionalFormatting({ ref: `C${RR[k]}:E${RR[k]}`, rules: [{ type: 'expression', formulae: [`LEFT(C${RR[k]},5)="CHECK"`], priority: 5,
+      style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFFC7CE' } }, font: { color: { argb: 'FF9C0006' }, bold: true } } }] });
     wr.views = [{ state: 'frozen', ySplit: 5, xSplit: 2 }];
 
     // ---------------- Indicators

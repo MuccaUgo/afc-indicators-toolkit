@@ -6,6 +6,7 @@
   let S = null, C = null, tab = 'setup';
   let saveFailed = false, alertedSave = false, restoreInfo = null;
   const notices = {};
+  const STD_BSK = new Set(SPEC.BS.filter(x => x[0] !== 'SEC').map(x => x[0])), STD_ISK = new Set(SPEC.IS.map(x => x[0]));
   const $ = (sel, root) => (root || document).querySelector(sel);
   const el = (tag, attrs, ...kids) => {
     const e = document.createElement(tag);
@@ -132,6 +133,13 @@
       pill.textContent = C.CHK.status;
       pill.className = 'pill ' + (C.CHK.status === 'ALL CHECKS OK' ? 'ok' : C.CHK.status === 'CHECK THE DATA' ? 'bad' : 'warn');
     }
+    const uw = C.CHK.unitWarn, msgs = [];
+    S.settings.years.forEach((y, i) => {
+      if (uw.shares[i]) msgs.push(`${y}: fewer than 100,000 shares. Type the number of shares in units, not in millions.`);
+      if (uw.eps[i]) msgs.push(`${y}: earnings per share above 10,000. Check the shares and the unit multiplier.`);
+      if (uw.da[i]) msgs.push(`${y}: depreciation is positive. Type costs with a minus sign.`);
+    });
+    setNotice('units', msgs.length ? 'Warning (not part of the status): ' + msgs.join(' ') : '', 'warn');
     const mini = $('#mini');
     if (mini) renderMini(mini);
     if (['reclass', 'ind'].includes(tab)) render();
@@ -220,6 +228,8 @@
         f('Unit label', textInput(st.unit, v => { st.unit = v; }, '', '€ m')),
         f('Unit multiplier (units per 1 in the statements)', textInput(String(st.mult), v => { const n = parseNum(v); st.mult = Number.isFinite(n) && n > 0 ? n : 1000000; }, 'num'), '1,000,000 if the statements are in millions. Used only for EPS.'),
         f('Check tolerance', textInput(String(st.tol), v => { const n = parseNum(v); st.tol = Number.isFinite(n) && n >= 0 ? n : 1; }, 'num'), 'Same unit as the statements. The lectures accept a difference of 1.'),
+        f('Rounding unit of the statements', textInput(String(st.roundUnit), v => { const n = parseNum(v); st.roundUnit = Number.isFinite(n) && n > 0 ? n : 1; }, 'num'), 'In the units of the statements: 1 = whole numbers (1,234), 0.1 = one decimal (1,234.5). Used only to tell a rounding gap from a typing error.'),
+        f('Income statement by function', sel([['0', 'No: purchases, services and personnel are shown'], ['1', 'Yes: cost of sales and SG&A (depreciation added back inside G&A automatically)']], st.byFunction ? '1' : '0', v => { st.byFunction = v === '1'; }), 'If yes: cost of sales on RAW, the other functional lines on GA, and depreciation typed once on the DA line (negative). Do not add it back by hand.'),
         f('Residual income: capital basis', sel([['1', '1 = equity + financial liabilities (lecture 08)'], ['2', '2 = reclassified invested capital (equity + NFP)']], String(st.basis), v => { st.basis = Number(v); }), 'State your choice on the slide: the two bases differ by the cash and financial assets deducted from debt.'),
         f('Number format', sel([['auto', 'Automatic: 1,234.5 and 1.234,5 both understood'], ['en', 'English: comma = thousands, point = decimal'], ['eu', 'European: point = thousands, comma = decimal']], st.numfmt || 'auto', v => { st.numfmt = v; }), 'Automatic reads 0,078 as 0.078 and a lone 1,234 as 1234 (thousands) but a lone 1.234 as 1.234 (decimal). Choose English or European to remove any doubt. Malformed numbers are rejected.'),
         f('Year labels (oldest first)', el('div', { class: 'years' }, st.years.map((y, i) => textInput(y, v => { st.years[i] = v || ('Y' + i); }, 'num'))), 'Type the labels, then tick the years in scope below.'),
@@ -238,17 +248,48 @@
       el('p', { class: 'note', text: 'This is a prototype. The Excel toolkit remains the reference; compare the results before relying on them. If you use AI to fill it, record it in the AI_Log sheet of the export.' }));
   }
 
+  function newKey(prefix, list) { const used = new Set(list.filter(l => l.key).map(l => l.key)); let n = 1; while (used.has(prefix + n)) n++; return prefix + n; }
+  function addBSLine(secIdx) {
+    let end = secIdx < 0 ? S.bs.length : secIdx + 1;
+    while (end < S.bs.length && !S.bs[end].sec) end++;
+    const inSec = secIdx < 0 ? [] : S.bs.slice(secIdx + 1, end);
+    const block = inSec.length ? inSec[inSec.length - 1].block : '';
+    S.bs.splice(end, 0, { key: newKey('custom', S.bs), label: 'New line', block, tag: '', q: false, hint: '', src: '', rev: false, v: [null, null, null] });
+    changed(); render();
+  }
+  function addISLine() {
+    S.is.push({ key: newKey('customis', S.is), label: 'New line', tag: '', hint: '', src: '', rev: false, v: [null, null, null] });
+    changed(); render();
+  }
+  function removeLine(kind, l) {
+    if (l.v.some(core.isNum) && !confirm('Remove "' + l.label + '" and its figures?')) return;
+    const arr = kind === 'bs' ? S.bs : S.is;
+    arr.splice(arr.indexOf(l), 1);
+    changed(); render();
+  }
   function lineRow(tbl, ri, l, kind) {
     const tr = el('tr', {});
-    tr.append(el('td', {}, textInput(l.label, v => { l.label = v; }, 'label')));
+    const custom = !(kind === 'bs' ? STD_BSK : STD_ISK).has(l.key);
+    const sheet = kind === 'bs' ? 'Balance sheet' : 'Income statement';
+    const mark = () => {
+      const it = C && C.CHK && C.CHK.review.find(x => x.sheet === sheet && x.key === l.key);
+      tr.className = it && !l.rev ? 'rv' : '';
+      tr.title = it ? 'To review: ' + it.reasons.join('; ') : '';
+    };
+    const unrev = fn => v => { fn(v); l.rev = false; };
+    const watch = [], w = c => { watch.push(c); return c; };
+    const labelInput = textInput(l.label, v => { l.label = v; }, 'label');
+    tr.append(el('td', {}, custom ? el('div', { class: 'lbl' }, labelInput, el('button', { class: 'btn small ghost', title: 'Remove this line', onclick: () => removeLine(kind, l), text: 'x' })) : labelInput));
     if (kind === 'bs') {
-      tr.append(el('td', {}, select(core.BLOCKS, l.block, v => { l.block = v; }, 'blk')), el('td', {}, select(core.BTAGS, l.tag, v => { l.tag = v; }, 'tag')),
+      tr.append(el('td', {}, w(select(core.BLOCKS, l.block, unrev(v => { l.block = v; }), 'blk'))), el('td', {}, w(select(core.BTAGS, l.tag, unrev(v => { l.tag = v; }), 'tag'))),
         el('td', { class: 'ctr' }, (() => { const c = el('input', { type: 'checkbox', title: 'Quick asset' }); c.checked = !!l.q; c.addEventListener('change', () => { l.q = c.checked; changed(); }); return c; })()));
     } else {
-      tr.append(el('td', {}, select(core.ITAGS, l.tag, v => { l.tag = v; }, 'tag')));
+      tr.append(el('td', {}, w(select(core.ITAGS, l.tag, unrev(v => { l.tag = v; }), 'tag'))));
     }
-    [0, 1, 2].forEach(y => tr.append(el('td', {}, numInput(tbl, ri, y, l.v[y], n => { l.v[y] = n; }))));
+    [0, 1, 2].forEach(y => tr.append(el('td', {}, w(numInput(tbl, ri, y, l.v[y], n => { l.v[y] = n; })))));
     tr.append(el('td', {}, textInput(l.src, v => { l.src = v; }, 'src', l.hint || 'Source page / note')));
+    watch.forEach(c => c.addEventListener('change', mark));
+    mark();
     return tr;
   }
   function viewBS(m) {
@@ -260,8 +301,13 @@
       body.append(lineRow('bs', ri++, l, 'bs'));
     }
     t.append(body);
-    m.append(el('h2', { text: 'Balance sheet' }), el('p', { class: 'lead', text: 'Lines as reported, positive numbers. Block: CA/NCA/AHFS assets, CL/NCL/LHFS liabilities, EQ equity. Tag: how the line is reclassified (FA fixed assets, OWC operating working capital, PROV provisions, HFS held for sale, CASH cash and financial assets, DEBT_ST / DEBT_LT financial debt, EQ equity). An empty cell is a missing figure; type 0 only for a real zero.' }),
-      el('div', { id: 'mini' }), el('div', { class: 'scroll' }, t));
+    const secs = S.bs.map((l, i) => (l.sec ? [i, l.sec] : null)).filter(Boolean);
+    const secSel = el('select', { class: 'cell' }, secs.map(([i, s]) => el('option', { value: String(i), text: s })));
+    const addRow = el('div', { class: 'row addline' }, secs.length ? el('label', { text: 'Add a line to: ' }) : null, secs.length ? secSel : null,
+      el('button', { class: 'btn ghost small', onclick: () => addBSLine(secs.length ? Number(secSel.value) : -1), text: 'Add line' }),
+      el('span', { class: 'hint', text: 'For a figure the standard list does not have. Set its block and tag; it is flagged for review until you confirm it on the Reclass tab.' }));
+    m.append(el('h2', { text: 'Balance sheet' }), el('p', { class: 'lead', text: 'Lines as reported, positive numbers. Block: CA/NCA/AHFS assets, CL/NCL/LHFS liabilities, EQ equity. Tag: how the line is reclassified (FA fixed assets, OWC operating working capital, PROV provisions, HFS held for sale, CASH cash and financial assets, DEBT_ST / DEBT_LT financial debt, EQ equity). An empty cell is a missing figure; type 0 only for a real zero. A yellow mark on the left of a row means the block or tag differs from the standard one: confirm it on the Reclass tab.' }),
+      addRow, el('div', { id: 'mini' }), el('div', { class: 'scroll' }, t));
   }
   function viewIS(m) {
     grids.is = [];
@@ -269,7 +315,13 @@
     const body = el('tbody', {});
     S.is.forEach((l, i) => body.append(lineRow('is', i, l, 'is')));
     t.append(body);
-    m.append(el('h2', { text: 'Income statement' }), el('p', { class: 'lead', text: 'Enter the profit effect of each line: income +, costs -. If the statement is by function (cost of sales, SG&A), put the cost lines on GA, add depreciation back from the cash flow statement on its own DA line and subtract the same amount from GA, so that EBIT stays unchanged.' }), el('div', { id: 'mini' }), el('div', { class: 'scroll' }, t));
+    const fnBox = el('input', { type: 'checkbox' }); fnBox.checked = !!S.settings.byFunction;
+    fnBox.addEventListener('change', () => { S.settings.byFunction = fnBox.checked; changed(); });
+    const fnRow = el('div', { class: 'row addline' }, el('label', { class: 'chk' }, fnBox, ' This income statement is by function (cost of sales, SG&A)'),
+      el('span', { class: 'hint', text: 'Cost of sales on RAW, other functional lines on GA, depreciation once on the DA line (negative, from the cash flow statement or notes). The toolkit adds it back inside G&A, so EBIT does not change. If you already added it back by hand, remove that line.' }));
+    const addRow = el('div', { class: 'row addline' }, el('button', { class: 'btn ghost small', onclick: addISLine, text: 'Add line' }),
+      el('span', { class: 'hint', text: 'A by-function statement usually needs five or more operating lines: cost of sales, selling, marketing, administrative, research and development, other.' }));
+    m.append(el('h2', { text: 'Income statement' }), el('p', { class: 'lead', text: 'Enter the profit effect of each line: income +, costs -. Use the spare lines or add lines for what the statement shows; tag every line.' }), fnRow, addRow, el('div', { id: 'mini' }), el('div', { class: 'scroll' }, t));
   }
   function viewSup(m) {
     grids.sup = [];
@@ -307,12 +359,32 @@
       el('table', { class: 'checks wide' }, el('thead', {}, el('tr', {}, ...['Statement', 'Line', 'Year', 'Block', 'Tag', 'Problem'].map(t => el('th', { text: t })))),
         el('tbody', {}, C.CHK.bad.map(b => el('tr', {}, el('td', { text: b.sheet }), el('td', { text: b.label }), el('td', { text: S.settings.years[b.year] }), el('td', { text: b.block || '(empty)' }), el('td', { text: b.tag || '(empty)' }), el('td', { class: 'st bad', text: b.reason })))))) : null;
     const src = C.CHK.sources;
+    // rounding advice (only when the balance check fails; not part of the status)
+    const Q = C.CHK.rounding, qRows = Q.map((q, i) => ({ q, i })).filter(x => x.q.advice && Y[x.i].inScope);
+    const roundPanel = qRows.length ? el('div', {}, el('h3', { text: 'Rounding advice (not part of the status)' }),
+      el('p', { class: 'note', text: 'The balance check failed. With figures rounded to the unit of the statements, the gap cannot exceed (number of figures x rounding unit / 2). If the gap is inside that limit and the figures are typed correctly, the cause is rounding: accept it by raising the tolerance. If it is larger, a figure is wrong or missing.' }),
+      el('table', { class: 'checks wide' }, el('thead', {}, el('tr', {}, ...['Year', 'Gap', 'Figures typed', 'Max rounding error', 'Advice', ''].map(h => el('th', { text: h })))),
+        el('tbody', {}, qRows.map(({ q, i }) => el('tr', {}, el('td', { text: S.settings.years[i] }), el('td', { class: 'num', text: fmt(q.gap, 'd1') }), el('td', { class: 'num', text: String(q.n) }), el('td', { class: 'num', text: fmt(q.maxErr, 'd1') }),
+          el('td', { class: 'st ' + (q.suggestTol !== null ? 'na' : 'bad'), text: q.advice }),
+          el('td', {}, q.suggestTol !== null && q.suggestTol > S.settings.tol ? el('button', { class: 'btn small', onclick: () => { S.settings.tol = Math.max(S.settings.tol, q.suggestTol); changed(); }, text: 'Set tolerance to ' + q.suggestTol }) : null)))))) : null;
+    // classification review (not part of the status)
+    const RV = C.CHK.review, open = RV.filter(x => !x.rev).length;
+    const lineOf = it => (it.sheet === 'Balance sheet' ? S.bs : S.is).find(l => l.key === it.key);
+    const reviewPanel = RV.length ? el('div', {}, el('h3', { text: `Classification review (not part of the status): ${open} of ${RV.length} to confirm` }),
+      el('p', { class: 'note', text: 'The reconciliations cannot see a line moved to a wrong tag when both sides stay in balance (for example a current financial debt tagged as working capital). These lines differ from the standard classification, or are not in the standard list. Check each against the notes of the report, then tick Reviewed. Largest first.' }),
+      el('div', { class: 'scroll' }, el('table', { class: 'checks wide' }, el('thead', {}, el('tr', {}, ...['Statement', 'Line', 'Standard', 'Now', 'Latest year', 'Amount', 'Share of assets / sales', 'Why', 'Reviewed'].map(h => el('th', { text: h })))),
+        el('tbody', {}, RV.map(it => el('tr', { class: it.rev ? 'done' : '' }, el('td', { text: it.sheet }), el('td', { text: it.label }), el('td', { text: it.std }), el('td', { text: it.now }), el('td', { text: S.settings.years[it.year] }),
+          el('td', { class: 'num', text: fmt(it.amount, 'num') }), el('td', { class: 'num', text: it.share === null ? 'n/a' : fmt(it.share, 'pct1') }), el('td', { class: 'hint', text: it.reasons.join('; ') }),
+          el('td', { class: 'ctr' }, (() => { const c = el('input', { type: 'checkbox', title: 'I checked this classification against the report' }); c.checked = !!it.rev; c.addEventListener('change', () => { const l = lineOf(it); if (l) { l.rev = c.checked; changed(); } }); return c; })()))))))) :
+      el('p', { class: 'note', text: 'Classification review: every line with a figure uses the standard block and tag.' });
     m.append(el('h2', { text: 'Reclass and checks' }), el('div', { class: 'statusbig ' + statusClass(), text: C.CHK.status }),
       el('p', { class: 'lead', text: 'ALL CHECKS OK means: every year in scope reconciles and has the balance sheet, the income statement and the five required supplementary inputs. It does not certify that the numbers match the report.' }),
       el('h3', { text: 'Status by year' }), yearTable,
       el('h3', { text: 'Reconciliations' }), chk,
+      roundPanel,
       el('p', { class: 'note', text: optRun ? `Optional checks not run: ${optRun} (reported net profit and reported total assets are not typed). They are not counted as passed.` : 'Optional checks (reported net profit, reported total assets) were run.' }),
-      bad,
+      bad, reviewPanel,
+      S.settings.byFunction ? el('p', { class: 'note', text: 'Income statement by function: depreciation (DA lines) is added back inside G&A automatically, so EBIT is not affected.' }) : null,
       el('h3', { text: 'Source references (separate check, not part of the status)' }),
       el('p', { class: 'note', text: `${src.withRef} of ${src.total} values used have a page or note typed. A reference that is typed is not proof that the figure was checked against the report.${src.missing.length ? ' Without reference: ' + src.missing.slice(0, 10).join(', ') + (src.missing.length > 10 ? ', ...' : '') + '.' : ''}` }),
       el('div', { class: 'scroll' }, el('table', { class: 'results' }, head, body)));
@@ -352,7 +424,7 @@
 
   function viewExport(m) {
     m.append(el('h2', { text: 'Export' }),
-      el('p', { class: 'lead', text: 'Downloads an .xlsx with the sheets Inputs, Reclass, Indicators and AI_Log. Formulas are live (as in the Excel toolkit), the years in scope are on Inputs row 11, and the values are already calculated, so previews show numbers too. Common size, peer and benchmark are not in the prototype: use the full Excel toolkit for those.' }),
+      el('p', { class: 'lead', text: 'Downloads an .xlsx with the sheets Inputs, Reclass, Indicators and AI_Log. Formulas are live (as in the Excel toolkit), the years in scope are on Inputs row 11, the rounding unit and the by-function switch on rows 12 and 13, the Review column marks lines to confirm, and the values are already calculated, so previews show numbers too. Common size, peer and benchmark are not in the prototype: use the full Excel toolkit for those.' }),
       el('div', { class: 'row' },
         el('button', { class: 'btn', id: 'dl', onclick: exportXlsx, text: 'Download Excel (.xlsx)' }),
         el('button', { class: 'btn ghost', onclick: saveFile, text: 'Save project (.json)' })),
@@ -367,6 +439,7 @@
     if (!v.ok) { alert('The project was not loaded and nothing was changed.\n' + v.errors.join('\n')); return false; }
     S = v.project; save(); tab = 'setup'; recalc(); render();
     setNotice('migrate', v.warnings.join(' '), 'warn');
+    setNotice('notes', v.notes.join(' '), 'info');
     return true;
   }
   function download(name, blob) {
