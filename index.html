@@ -50,6 +50,13 @@ td.st.ok{background:var(--ok);color:var(--okt);font-weight:700}td.st.bad{backgro
 .statusbig.ok{background:var(--ok);color:var(--okt)}.statusbig.bad{background:var(--bad);color:var(--badt)}.statusbig.warn{background:var(--warn);color:var(--warnt)}
 table.mini{max-width:520px;margin-bottom:12px;border:1px solid var(--line);background:var(--card)}table.mini th{position:static}
 .sens th.base,.sens td.base{outline:2px solid var(--teal)}
+.notice{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 20px;font-size:14px;border-bottom:1px solid var(--line)}
+.notice.warn{background:var(--warn);color:var(--warnt)}.notice.bad{background:var(--bad);color:var(--badt)}
+.notice span{flex:1;min-width:240px}
+.btn.small{padding:4px 10px;font-size:13px}
+label.chk{display:inline-flex;gap:4px;align-items:center;margin-right:10px;font-weight:400}
+table.checks.wide{max-width:1100px}
+td.na{color:var(--mute)}
 footer{padding:18px 20px 36px;color:var(--mute);font-size:12px;max-width:1280px;margin:0 auto}
 @media (max-width:640px){main{padding:14px}header{padding:10px 14px}nav{top:98px;padding:8px 14px 0}}
 </style>
@@ -59,6 +66,7 @@ footer{padding:18px 20px 36px;color:var(--mute);font-size:12px;max-width:1280px;
   <h1>AFC Indicators Toolkit <small>Reclassification, data checks, 24 course indicators, residual income, Excel export. Prototype.</small></h1>
   <span id="status" class="pill warn">NO DATA YET</span>
 </header>
+<div id="notice" role="status" aria-live="polite"></div>
 <nav id="nav"></nav>
 <main id="main"></main>
 <footer>Prototype for study use: not an official tool of the course. Your data stays in this browser (local storage) and is never sent anywhere. Always compare the results with the Excel toolkit and the source report. Declare any AI use in the AI disclosure annex.</footer>
