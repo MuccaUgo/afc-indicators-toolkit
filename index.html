@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AFC Indicators Toolkit (prototype)</title>
+<meta name="description" content="Financial statement reclassification, data checks, course indicators and Excel export. Prototype for AFC Challenge 1. Data stays in the browser.">
+<style>
+:root{--navy:#12263A;--teal:#1F7A8C;--bg:#F6F5F1;--card:#FDFCFA;--line:#D9D6CC;--ink:#12263A;--mute:#5B6770;--yel:#FFF6D6;--ok:#C6EFCE;--okt:#006100;--bad:#FFC7CE;--badt:#9C0006;--warn:#FFEB9C;--warnt:#7A4A00}
+@media (prefers-color-scheme:dark){:root{--bg:#0F1A26;--card:#16222F;--line:#2B3A4A;--ink:#E8EDF2;--mute:#9AA9B7;--yel:#2A2A1A;--navy:#0B1520;--teal:#5BB6C6}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif}
+header{background:var(--navy);color:#F6F5F1;padding:14px 20px;display:flex;gap:16px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:5}
+header h1{font-size:18px;margin:0;font-weight:700;flex:1;min-width:220px}
+header small{color:#B9C4CC;display:block;font-weight:400;font-size:12px}
+.pill{padding:6px 12px;border-radius:999px;font-weight:700;font-size:13px;white-space:nowrap}
+.pill.ok{background:var(--ok);color:var(--okt)}.pill.bad{background:var(--bad);color:var(--badt)}.pill.warn{background:var(--warn);color:var(--warnt)}
+nav{display:flex;gap:4px;padding:10px 20px 0;overflow-x:auto;border-bottom:1px solid var(--line);background:var(--bg);position:sticky;top:62px;z-index:4}
+.tab{border:0;background:transparent;color:var(--mute);padding:9px 14px;font:inherit;font-weight:600;cursor:pointer;border-bottom:3px solid transparent;white-space:nowrap}
+.tab.on{color:var(--teal);border-bottom-color:var(--teal)}
+main{padding:20px;max-width:1280px;margin:0 auto}
+h2{margin:6px 0 4px;font-size:22px}h3{margin:22px 0 6px}
+.lead{color:var(--mute);margin:4px 0 14px;max-width:900px}.note{color:var(--mute);font-size:13px;max-width:900px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;max-width:960px;margin-bottom:16px}
+.field label{display:block;font-weight:600;margin-bottom:4px;font-size:13px}.field small{display:block;color:var(--mute);margin-top:3px;font-size:12px}
+.years{display:flex;gap:8px}
+.row{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 18px}
+.btn{background:var(--teal);color:#fff;border:1px solid var(--teal);padding:9px 16px;border-radius:8px;font:inherit;font-weight:600;cursor:pointer;display:inline-block}
+.btn.ghost{background:transparent;color:var(--teal)}
+.cell{width:100%;border:1px solid var(--line);background:var(--yel);color:var(--ink);padding:5px 7px;border-radius:5px;font:inherit}
+.cell.num{text-align:right;font-variant-numeric:tabular-nums}.cell.err{border-color:#C00;background:var(--bad)}
+.cell.label,.cell.src{background:var(--card)}
+select.cell{padding:4px}
+.scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px;background:var(--card)}
+table{border-collapse:collapse;width:100%}
+th,td{padding:5px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:middle}
+th{background:var(--navy);color:#F6F5F1;font-size:13px;position:sticky;top:0}
+th.num,td.num{text-align:right}
+.inputs td:nth-child(1){min-width:300px}.inputs td:nth-child(2),.inputs td:nth-child(3){min-width:84px}.inputs td.ctr{text-align:center}
+.inputs td:has(input.num){min-width:96px}.cell.src{min-width:220px}
+tr.sec td{background:#DDE8E6;color:#12263A;font-weight:700}
+@media (prefers-color-scheme:dark){tr.sec td{background:#223445;color:#E8EDF2}}
+.results td.num{font-variant-numeric:tabular-nums}.results tr.strong td{font-weight:700;background:rgba(31,122,140,.08)}
+.results td.f{color:var(--mute);font-size:13px;min-width:260px}.results td.hint,.hint{color:var(--mute);font-size:12px}.results tr.sub td{color:var(--mute)}
+.results.ind td.l{font-weight:600;white-space:nowrap}
+table.checks{margin:10px 0 18px;max-width:860px;border:1px solid var(--line)}
+td.st.ok{background:var(--ok);color:var(--okt);font-weight:700}td.st.bad{background:var(--bad);color:var(--badt);font-weight:700}td.st.na{color:var(--mute)}
+.statusbig{display:inline-block;padding:10px 18px;border-radius:10px;font-size:17px;font-weight:700;margin:6px 0 8px}
+.statusbig.small{font-size:14px;padding:6px 12px}
+.statusbig.ok{background:var(--ok);color:var(--okt)}.statusbig.bad{background:var(--bad);color:var(--badt)}.statusbig.warn{background:var(--warn);color:var(--warnt)}
+table.mini{max-width:520px;margin-bottom:12px;border:1px solid var(--line);background:var(--card)}table.mini th{position:static}
+.sens th.base,.sens td.base{outline:2px solid var(--teal)}
+footer{padding:18px 20px 36px;color:var(--mute);font-size:12px;max-width:1280px;margin:0 auto}
+@media (max-width:640px){main{padding:14px}header{padding:10px 14px}nav{top:98px;padding:8px 14px 0}}
+</style>
+</head>
+<body>
+<header>
+  <h1>AFC Indicators Toolkit <small>Reclassification, data checks, 24 course indicators, residual income, Excel export. Prototype.</small></h1>
+  <span id="status" class="pill warn">NO DATA YET</span>
+</header>
+<nav id="nav"></nav>
+<main id="main"></main>
+<footer>Prototype for study use: not an official tool of the course. Your data stays in this browser (local storage) and is never sent anywhere. Always compare the results with the Excel toolkit and the source report. Declare any AI use in the AI disclosure annex.</footer>
+<script src="data.js"></script>
+<script src="core.js"></script>
+<script>
+(function load(urls){
+  var u=urls.shift(); if(!u){return;}
+  var s=document.createElement('script'); s.src=u; s.onerror=function(){load(urls)};
+  document.head.appendChild(s);
+})(['https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js','https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js']);
+</script>
+<script src="ui.js"></script>
+</body>
+</html>
